@@ -1,0 +1,25 @@
+ĐỀ BÀI: XÂY DỰNG PIPELINE NHẬN DIỆN VÀ ĐÓNG KHUNG SUBTITLE TIẾNG TRUNG TRÊN VIDEO MP4
+
+1. MỤC TIÊU BÀI TOÁN
+Xây dựng một chương trình/pipeline bằng Python nhận đầu vào là file video .mp4 bất kỳ, thực hiện:
+- Tự động phát hiện vị trí phụ đề tiếng Trung (hard-coded sub) xuất hiện trong video.
+- Vẽ bounding box (hộp bao đóng) chuẩn xác, ôm sát từng dòng phụ đề qua từng khung hình mà không bị giật, nhấp nháy (flickering).
+- Xuất video hoàn thiện đã vẽ box và (tùy chọn) trích xuất tọa độ hoặc file .srt kèm timestamp.
+
+2. YÊU CẦU KỸ THUẬT VÀ CHỨC NĂNG
+- Định dạng đầu vào/đầu ra: Tương thích với hầu hết video .mp4 (chuẩn mã hóa H.264/H.265, độ phân giải phổ biến 720p - 1080p).
+- Xử lý vùng quan tâm (ROI): Tập trung quét khu vực 25% - 45% đáy màn hình để tối ưu tốc độ tính toán và hạn chế nhận diện nhầm chữ trên biển hiệu, logo hoặc áo nhân vật.
+- Độ ổn định qua thời gian (Temporal Consistency): Giữ bounding box hiển thị mượt mà giữa các frame liên tiếp khi câu phụ đề chưa đổi, tránh tình trạng mất khung chớp tắt ở 1-2 frame ngắt quãng.
+- Công nghệ đề xuất: Python, OpenCV, NumPy kết hợp PaddleOCR (mô hình tối ưu nhất hiện nay cho chữ Hán) hoặc EasyOCR / YOLO.
+
+
+3. ƯỚC TÍNH CẤU HÌNH PHẦN CỨNG VÀ THỜI GIAN XỬ LÝ
+- Máy văn phòng (Chỉ dùng CPU Core i5/i7 thế hệ mới, RAM 16GB, không GPU rời):
+- Laptop / PC đồ họa tầm trung (GPU NVIDIA RTX 3050 / RTX 3060 với 6GB - 12GB VRAM)
+- Máy trạm / Server AI chuyên dụng (GPU NVIDIA RTX 4070 / RTX 4090 hoặc Tesla T4 Cloud)
+- Dòng máy Apple Silicon (Chip Apple M1 / M2 / M3 Pro hoặc Max)
+
+4. CÁC MẸO TỐI ƯU HIỆU NĂNG QUAN TRỌNG
+- Luôn cắt vùng quan tâm (ROI) ở đáy màn hình trước khi nạp vào model, giúp giảm 55% - 75% khối lượng ma trận tính toán.
+- Tắt tính năng nhận dạng mặt chữ (Recognition: rec=False), chỉ giữ tính năng phát hiện vị trí (Detection: det=True) nếu mục tiêu bài toán chỉ dừng lại ở việc vẽ khung bao đóng.
+- Đóng gói theo lô (Batch Inference) khi chạy trên GPU thay vì gọi model từng frame riêng lẻ để tận dụng tối đa băng thông VRAM.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            

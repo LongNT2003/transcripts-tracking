@@ -1,0 +1,7 @@
+paddleocr==3.7.0
+paddlex[ocr-core]==3.7.2
+opencv-contrib-python==4.10.0.84
+numpy==2.3.5
+av==18.1.0
+imageio-ffmpeg==0.6.0
+psutil==7.2.2

@@ -1,0 +1,7 @@
+.venv/
+.testvenv/
+.cache/
+__pycache__/
+.pytest_cache/
+outputs/
+*.mp4
