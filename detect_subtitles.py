@@ -1,6 +1,5 @@
 """Detect and draw hard-coded subtitles, preserving source video timestamps."""
 import argparse
-from collections import deque
 from fractions import Fraction
 import importlib.metadata
 import json
@@ -17,7 +16,7 @@ import imageio_ffmpeg
 import numpy as np
 import psutil
 
-from subtitle_core import Record, Stabilizer, boxes_from_result
+from subtitle_core import Record, SubtitleSegments, boxes_from_result
 
 MODEL = 'PP-OCRv6_small_det'
 
@@ -130,6 +129,26 @@ def validate(args):
             raise FileExistsError(f'{path} exists; use --overwrite explicitly')
 
 
+def selected_frames(source, args):
+    """Decode in presentation order and select the same source interval on both passes."""
+    first_source_time = previous_timestamp = None
+    for index, frame in enumerate(source.decode(source.streams.video[0])):
+        if frame.pts is None:
+            raise RuntimeError('Source frame missing PTS; cannot guarantee audio synchronization')
+        timestamp = float(frame.pts*frame.time_base)
+        if previous_timestamp is not None and timestamp <= previous_timestamp:
+            raise RuntimeError('Source timestamps must increase strictly')
+        previous_timestamp = timestamp
+        if first_source_time is None:
+            first_source_time = timestamp
+        relative = timestamp-first_source_time
+        if relative < args.start-1e-7:
+            continue
+        if args.duration is not None and relative >= args.start+args.duration-1e-7:
+            break
+        yield index, timestamp, relative, frame
+
+
 def run(args, detector=None):
     validate(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -157,116 +176,104 @@ def run(args, detector=None):
         video_path = Path(tmp)/'silent.mp4'
         json_path = Path(tmp)/'boxes.jsonl'
         final_path = Path(tmp)/'result.mp4'
-        queue = deque()
-        stabilizer = Stabilizer()
-        batch, frame_durations = [], deque(maxlen=2)
-        first_source_time = None
-        first_output_time = None
-        previous_timestamp = None
-        last_time = None
+        segments = SubtitleSegments(width, height, args.padding)
+        frames, batch = [], []
         process_start = time.perf_counter()
         warmed = False
-        with av.open(str(video_path), 'w') as sink, json_path.open('w', encoding='utf-8') as records:
+
+        def infer_batch():
+            nonlocal warmed
+            crops = [record.image[roi_y:].copy() for record, _ in batch]
+            if not warmed:
+                begin = time.perf_counter()
+                for _ in range(args.warmup):
+                    detector.predict(crops)
+                metrics['warmup_seconds'] = time.perf_counter()-begin
+                warmed = True
+            results, elapsed = detector.predict(crops)
+            metrics['inference_seconds'] += elapsed
+            metrics['batch_latency_ms'].append(1000*elapsed)
+            begin = time.perf_counter()
+            for (record, relative), result in zip(batch, results):
+                boxes = boxes_from_result(result, roi_y, width, height, args.box_threshold)
+                segments.add(record.gray, boxes)
+                frames.append((record.index, record.timestamp, relative, record.duration))
+            metrics['postprocess_seconds'] += time.perf_counter()-begin
+            batch.clear()
+            if len(frames) and len(frames) % 240 < args.batch_size:
+                print(f'Detected {len(frames)} frames', flush=True)
+
+        # Pass 1: detect every selected frame, then settle each subtitle run's box.
+        decoded = iter(selected_frames(source, args))
+        while True:
+            begin = time.perf_counter()
+            try:
+                index, timestamp, relative, frame = next(decoded)
+            except StopIteration:
+                break
+            image = frame.to_ndarray(format='bgr24')
+            duration = float(frame.duration*frame.time_base) if frame.duration else 1/float(rate)
+            batch.append((Record(index, timestamp, duration, image,
+                                 cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), []), relative))
+            metrics['decode_seconds'] += time.perf_counter()-begin
+            if len(batch) == args.batch_size:
+                infer_batch()
+        if batch:
+            infer_batch()
+        if not frames:
+            raise ValueError('Selected video interval has no frames')
+        begin = time.perf_counter()
+        stable_boxes = segments.finish()
+        metrics['postprocess_seconds'] += time.perf_counter()-begin
+        metrics['subtitle_segments'] = segments.count
+        first_output_time = frames[0][1]
+        last_time = frames[-1][1]
+        last_duration = frames[-1][3]
+        video_duration = last_time-first_output_time+last_duration
+
+        # Pass 2: draw the finalized boxes on the original frames and preserve PTS.
+        with av.open(str(args.input)) as original, av.open(str(video_path), 'w') as sink, \
+                json_path.open('w', encoding='utf-8') as records:
             enc = sink.add_stream('libx264', rate=rate)
             enc.width, enc.height = width, height
             enc.pix_fmt = 'yuv420p' if width%2 == 0 and height%2 == 0 else 'yuv444p'
             enc.time_base = tb
             enc.codec_context.time_base = tb
             enc.options = {'crf': '18', 'preset': 'fast', 'bf': '0'}
-
-            def emit():
-                nonlocal last_time
-                current = queue.popleft()
+            for output_index, (index, timestamp, _, frame) in enumerate(selected_frames(original, args)):
+                if output_index >= len(frames):
+                    raise RuntimeError('Source changed between detection and rendering')
+                expected_index, expected_time, expected_relative, duration = frames[output_index]
+                if index != expected_index or abs(timestamp-expected_time) > 1e-7:
+                    raise RuntimeError('Source changed between detection and rendering')
                 begin = time.perf_counter()
-                boxes = stabilizer.step(current, list(queue)[:2])
-                drawn = []
-                for b in boxes:
-                    x1, y1, x2, y2 = np.rint(b).astype(int)
-                    x1, y1 = max(0, x1-args.padding), max(0, y1-args.padding)
-                    x2, y2 = min(width-1, x2+args.padding), min(height-1, y2+args.padding)
-                    cv2.rectangle(current.image, (x1,y1), (x2,y2), (0,255,0), 2)
-                    drawn.append([int(x1),int(y1),int(x2),int(y2)])
-                records.write(json.dumps({'frame_index': current.index,
-                                          'source_timestamp_seconds': current.timestamp-first_source_time,
-                                          'output_timestamp_seconds': current.timestamp-first_output_time,
+                image = frame.to_ndarray(format='bgr24')
+                metrics['decode_seconds'] += time.perf_counter()-begin
+                begin = time.perf_counter()
+                drawn = stable_boxes[output_index]
+                for x1, y1, x2, y2 in drawn:
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                records.write(json.dumps({'frame_index': index,
+                                          'source_timestamp_seconds': expected_relative,
+                                          'output_timestamp_seconds': timestamp-first_output_time,
                                           'boxes_xyxy': drawn})+'\n')
                 metrics['postprocess_seconds'] += time.perf_counter()-begin
                 begin = time.perf_counter()
-                frame = av.VideoFrame.from_ndarray(current.image, format='bgr24')
-                frame.pts = round((current.timestamp-first_output_time)/float(tb))
-                frame.time_base = tb
-                frame.duration = max(1, round(current.duration/float(tb)))
-                for packet in enc.encode(frame):
+                output_frame = av.VideoFrame.from_ndarray(image, format='bgr24')
+                output_frame.pts = round((timestamp-first_output_time)/float(tb))
+                output_frame.time_base = tb
+                output_frame.duration = max(1, round(duration/float(tb)))
+                for packet in enc.encode(output_frame):
                     sink.mux(packet)
                 metrics['encode_seconds'] += time.perf_counter()-begin
                 metrics['frames'] += 1
-                frame_durations.append(current.duration)
-                last_time = current.timestamp
-
-            def infer_batch():
-                nonlocal warmed
-                crops = [r.image[roi_y:].copy() for r in batch]
-                if not warmed:
-                    begin = time.perf_counter()
-                    for _ in range(args.warmup):
-                        detector.predict(crops)
-                    metrics['warmup_seconds'] = time.perf_counter()-begin
-                    warmed = True
-                results, elapsed = detector.predict(crops)
-                metrics['inference_seconds'] += elapsed
-                metrics['batch_latency_ms'].append(1000*elapsed)
-                begin = time.perf_counter()
-                for record, result in zip(batch, results):
-                    record.boxes = boxes_from_result(result, roi_y, width, height, args.box_threshold)
-                    queue.append(record)
-                metrics['postprocess_seconds'] += time.perf_counter()-begin
-                while len(queue) > 2:
-                    emit()
-                batch.clear()
-                if metrics['frames'] and metrics['frames'] % 240 < args.batch_size:
-                    print(f"Processed {metrics['frames']} frames", flush=True)
-
-            decoded = iter(source.decode(stream))
-            index = -1
-            while True:
-                begin = time.perf_counter()
-                try:
-                    frame = next(decoded)
-                except StopIteration:
-                    break
-                index += 1
-                if frame.pts is None:
-                    raise RuntimeError('Source frame missing PTS; cannot guarantee audio synchronization')
-                timestamp = float(frame.pts*frame.time_base)
-                if previous_timestamp is not None and timestamp <= previous_timestamp:
-                    raise RuntimeError('Source timestamps must increase strictly')
-                previous_timestamp = timestamp
-                if first_source_time is None:
-                    first_source_time = timestamp
-                relative = timestamp-first_source_time
-                if relative < args.start-1e-7:
-                    continue
-                if args.duration is not None and relative >= args.start+args.duration-1e-7:
-                    break
-                if first_output_time is None:
-                    first_output_time = timestamp
-                image = frame.to_ndarray(format='bgr24')
-                duration = float(frame.duration*frame.time_base) if frame.duration else 1/float(rate)
-                batch.append(Record(index, timestamp, duration, image, cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), []))
-                metrics['decode_seconds'] += time.perf_counter()-begin
-                if len(batch) == args.batch_size:
-                    infer_batch()
-            if batch:
-                infer_batch()
-            if not warmed:
-                raise ValueError('Selected video interval has no frames')
-            while queue:
-                emit()
+            if metrics['frames'] != len(frames):
+                raise RuntimeError('Source changed between detection and rendering')
             begin = time.perf_counter()
             for packet in enc.encode():
                 sink.mux(packet)
             metrics['encode_seconds'] += time.perf_counter()-begin
-        video_duration = last_time-first_output_time+frame_durations[-1]
+
         mux_start = time.perf_counter()
         # Audio trim uses source presentation timestamps, including stream offsets.
         cmd = [imageio_ffmpeg.get_ffmpeg_exe(), '-hide_banner', '-loglevel', 'error', '-y',
@@ -307,7 +314,7 @@ def run(args, detector=None):
             if count != metrics['frames']:
                 raise RuntimeError(f'Output frame count mismatch: {count}')
             actual_duration = float(check.streams.video[0].duration*check.streams.video[0].time_base)
-            if abs(actual_duration-video_duration) > max(frame_durations[-1],1/float(rate))+1e-5:
+            if abs(actual_duration-video_duration) > max(last_duration,1/float(rate))+1e-5:
                 raise RuntimeError('Output video duration changed by more than one frame')
             if bool(check.streams.audio) != bool(source.streams.audio):
                 raise RuntimeError('Output audio stream missing or unexpected')

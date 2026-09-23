@@ -94,3 +94,46 @@ def test_delayed_audio_keeps_offset_after_trim(tmp_path):
         a, b = source.streams.audio[0], result.streams.audio[0]
         # One AAC frame of encoder priming is tolerated (1024 samples at 48 kHz).
         assert abs(float(b.start_time*b.time_base) - (float(a.start_time*a.time_base)-.1)) < .025
+
+
+def test_render_uses_constant_box_for_one_subtitle(tmp_path):
+    import cv2
+
+    source_path, output = tmp_path/'input.mp4', tmp_path/'output.mp4'
+    with av.open(str(source_path), 'w') as sink:
+        stream = sink.add_stream('libx264', rate=30)
+        stream.width, stream.height = 160, 120
+        stream.pix_fmt = 'yuv420p'
+        stream.options = {'bf': '0'}
+        for i in range(8):
+            image = np.zeros((120, 160, 3), np.uint8)
+            cv2.putText(image, 'SAME LINE', (30, 84), cv2.FONT_HERSHEY_SIMPLEX,
+                        .35, (255, 255, 255), 1)
+            frame = av.VideoFrame.from_ndarray(image, format='bgr24')
+            frame.pts = i
+            for packet in stream.encode(frame):
+                sink.mux(packet)
+        for packet in stream.encode():
+            sink.mux(packet)
+
+    class JitterDetector:
+        calls = 0
+
+        def predict(self, images):
+            results = []
+            for _ in images:
+                x = 28 + (self.calls % 3)
+                self.calls += 1
+                results.append({'dt_polys': [[[x, 10], [x+85, 10],
+                                               [x+85, 20], [x, 20]]],
+                                'dt_scores': [.9]})
+            return results, .001
+
+    args = parser().parse_args(['--input', str(source_path), '--output', str(output),
+                                '--device', 'cpu', '--warmup', '0'])
+    metrics = run(args, detector=JitterDetector())
+    rows = [json.loads(line) for line in output.with_suffix('.jsonl').read_text().splitlines()]
+    assert metrics['subtitle_segments'] == 1
+    assert len(rows) == 8
+    assert all(row['boxes_xyxy'] == rows[0]['boxes_xyxy'] for row in rows)
+    assert rows[0]['boxes_xyxy']

@@ -37,9 +37,9 @@ Không ghi đè nếu thiếu `--overwrite`; không cho phép dùng đường d�
 
 Quét mọi frame, crop 45% đáy trước detector. Model resize tối đa cạnh dài 960 px, không phóng lớn ROI nhỏ. `--roi-bottom 0.25` đến `0.45` điều chỉnh vùng quét; ROI hẹp có thể bỏ phụ đề nằm cao trong video dọc.
 
-Polygon được quy đổi về ảnh gốc, lọc confidence/kích thước/góc, ghép mảnh chữ cùng dòng. Tracker ghép theo IoU và dấu vết cạnh chữ, làm mượt box với độ trễ tọa độ tối đa 2 px. Chỉ bù khoảng mất detection tối đa 2 frame khi ảnh vùng chữ vẫn tương đồng và có detection trở lại trong lookahead. Câu mới/biến mất không được giữ box vô điều kiện. Box xanh có padding 3 px, nét 2 px.
+Polygon được quy đổi về ảnh gốc, lọc confidence/kích thước/góc, rồi ghép mảnh chữ cùng dòng. Pipeline chạy hai lượt: lượt đầu detect và gom các frame liên tiếp có cùng dòng phụ đề bằng IoU và dấu vết cạnh chữ trên một vùng ảnh cố định; lượt sau đọc lại video gốc để vẽ. Mỗi đoạn được chốt một box từ phân vị 10%/90% của các detection, nên box đứng yên trong suốt đoạn. Có thể bù tối đa 2 frame mất detection khi hình dạng chữ vẫn giống và detection xuất hiện trở lại. Khi câu thay đổi hoặc chữ biến mất, đoạn được kết thúc. Box xanh có padding 3 px, nét 2 px.
 
-GPU dùng batch 8, CPU batch 1; đổi bằng `--batch-size`. Nếu thiếu VRAM, giảm batch xuống 4/2/1. Bộ nhớ ảnh giới hạn theo batch + 2 frame lookahead. `--box-threshold`, `--pixel-threshold`, `--det-size`, `--padding`, `--cpu-threads` đều chỉnh được; xem `--help`.
+GPU dùng batch 8, CPU batch 1; đổi bằng `--batch-size`. Nếu thiếu VRAM, giảm batch xuống 4/2/1. Bộ nhớ ảnh giới hạn theo batch; tọa độ frame và box của các đoạn được giữ đến lượt vẽ thứ hai. Video nguồn được giải mã hai lần. `--box-threshold`, `--pixel-threshold`, `--det-size`, `--padding`, `--cpu-threads` đều chỉnh được; xem `--help`.
 
 CPU mặc định tắt oneDNN: kiểm thử PP-OCRv6_small_det với PaddlePaddle 3.3.0 Windows gặp lỗi `ConvertPirAttribute2RuntimeAttribute` khi bật. Chỉ thử `--enable-mkldnn` trên runtime đã xác nhận hỗ trợ; nếu lỗi, bỏ cờ này. Benchmark phải ghi rõ trạng thái oneDNN để so sánh công bằng.
 
@@ -53,7 +53,7 @@ Chữ trên áo/biển hiệu trong ROI vẫn có thể bị nhận nhầm. Ph�
 
 Mỗi lần chạy dùng process riêng, warm-up 3 batch. Lưu video/log/metrics từng lần; `summary.csv`, `summary.json`, `report.md` tổng hợp median/min/max. Dùng thư mục mới cho mỗi đợt benchmark; `--report-only` tái tạo báo cáo từ kết quả cũ.
 
-`processing_seconds` là wall time xử lý gồm decode, detect, tracking, encode và ghép audio, không gồm khởi tạo model, warm-up, bước decode xác minh output. `inference_seconds` bao gồm tiền/hậu xử lý của PaddleX và được đồng bộ GPU. Latency p95/median tính **theo batch**, không phải độ trễ từng frame. `amortized_inference_ms_per_frame` là tổng thời gian inference chia số frame. `total_seconds_including_init_warmup_verify` phản ánh tổng thời gian kể cả chuẩn bị/kiểm tra. Seek đến `--start` hiện decode và bỏ các frame trước đó; hãy benchmark cùng start để so sánh công bằng.
+`processing_seconds` là wall time xử lý gồm hai lượt decode, detect, gom đoạn, encode và ghép audio, không gồm khởi tạo model, warm-up, bước decode xác minh output. `inference_seconds` bao gồm tiền/hậu xử lý của PaddleX và được đồng bộ GPU. Latency p95/median tính **theo batch**, không phải độ trễ từng frame. `amortized_inference_ms_per_frame` là tổng thời gian inference chia số frame. `total_seconds_including_init_warmup_verify` phản ánh tổng thời gian kể cả chuẩn bị/kiểm tra. Seek đến `--start` hiện decode và bỏ các frame trước đó; hãy benchmark cùng start để so sánh công bằng.
 
 Các máy không đo được được ghi **chưa đủ dữ liệu**, không suy tốc độ từ TFLOPS/VRAM. Để thêm ước lượng có căn cứ, truyền `--estimates estimates.json`, dạng mảng:
 

@@ -126,3 +126,72 @@ class Stabilizer:
                 new_tracks.append((box, sig, missed+1))
         self.tracks = new_tracks
         return sorted(result, key=lambda b: (b[1], b[0]))
+
+
+class SubtitleSegments:
+    """Assign one robust, screen-space box to each stationary subtitle run."""
+
+    def __init__(self, width, height, padding=3, max_gap=2):
+        self.width, self.height = width, height
+        self.padding, self.max_gap = padding, max_gap
+        self.frames = []
+        self.active = []
+        self.count = 0
+
+    def _finish(self, track):
+        coords = np.asarray(track['boxes'], dtype=float)
+        low = np.quantile(coords[:, :2], .1, axis=0)
+        high = np.quantile(coords[:, 2:], .9, axis=0)
+        x1, y1 = np.floor(low).astype(int) - self.padding
+        x2, y2 = np.ceil(high).astype(int) + self.padding
+        box = [max(0, int(x1)), max(0, int(y1)),
+               min(self.width-1, int(x2)), min(self.height-1, int(y2))]
+        if box[0] >= box[2] or box[1] >= box[3]:
+            return
+        for index in range(track['start'], track['last']+1):
+            self.frames[index].append(box)
+        self.count += 1
+
+    def add(self, gray, boxes):
+        index = len(self.frames)
+        self.frames.append([])
+        signatures = [appearance(gray, track['anchor']) for track in self.active]
+        candidates = []
+        for ti, track in enumerate(self.active):
+            for bi, box in enumerate(boxes):
+                overlap = iou(track['boxes'][-1], box)
+                if overlap >= .5 and similar(track['signature'], signatures[ti], threshold=.8):
+                    candidates.append((overlap, ti, bi))
+        matched_tracks, matched_boxes = set(), set()
+        for _, ti, bi in sorted(candidates, reverse=True):
+            if ti in matched_tracks or bi in matched_boxes:
+                continue
+            track = self.active[ti]
+            track['boxes'].append(boxes[bi])
+            track['signature'] = signatures[ti]
+            track['last'] = index
+            matched_tracks.add(ti)
+            matched_boxes.add(bi)
+        remaining = []
+        for ti, track in enumerate(self.active):
+            if ti in matched_tracks:
+                remaining.append(track)
+            elif (index-track['last'] <= self.max_gap
+                  and not any(iou(track['boxes'][-1], box) > .2 for box in boxes)
+                  and similar(track['signature'], signatures[ti], threshold=.8)):
+                remaining.append(track)
+            else:
+                self._finish(track)
+        self.active = remaining
+        for bi, box in enumerate(boxes):
+            if bi not in matched_boxes:
+                self.active.append({'start': index, 'last': index, 'anchor': box,
+                                    'boxes': [box], 'signature': appearance(gray, box)})
+
+    def finish(self):
+        for track in self.active:
+            self._finish(track)
+        self.active.clear()
+        for boxes in self.frames:
+            boxes.sort(key=lambda box: (box[1], box[0]))
+        return self.frames
