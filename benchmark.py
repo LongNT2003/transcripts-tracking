@@ -70,12 +70,15 @@ def main():
     p.add_argument('--duration', type=float, default=30)
     p.add_argument('--start', type=float, default=0)
     p.add_argument('--repeats', type=int, default=3)
+    p.add_argument('--batch-size', type=int, help='Frames per inference call; default follows device (CPU 1, GPU 8)')
     p.add_argument('--output-dir', type=Path, default=Path('outputs/benchmark'))
     p.add_argument('--estimates', type=Path)
     p.add_argument('--report-only', action='store_true')
     args = p.parse_args()
     if args.repeats < 1 or args.duration <= 0:
         p.error('Repeats and duration must be positive')
+    if args.batch_size is not None and args.batch_size < 1:
+        p.error('Batch size must be positive')
     args.output_dir.mkdir(parents=True, exist_ok=True)
     failure_path = args.output_dir/'failures.json'
     failures = json.loads(failure_path.read_text(encoding='utf-8')) if args.report_only and failure_path.exists() else []
@@ -88,6 +91,8 @@ def main():
                 command = [sys.executable, str(Path(__file__).with_name('detect_subtitles.py')),
                            '--input', str(args.input.resolve()), '--output', str(output.resolve()),
                            '--device', device, '--start', str(args.start), '--duration', str(args.duration)]
+                if args.batch_size is not None:
+                    command.extend(['--batch-size', str(args.batch_size)])
                 with output.with_suffix('.log').open('w', encoding='utf-8') as log:
                     proc = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
                 if proc.returncode:

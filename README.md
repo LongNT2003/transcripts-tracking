@@ -51,7 +51,7 @@ Chữ trên áo/biển hiệu trong ROI vẫn có thể bị nhận nhầm. Ph�
 .\.venv\Scripts\python benchmark.py --input "AI Engineer test.mp4" --devices cpu gpu:0 --duration 30 --repeats 3 --output-dir outputs/benchmark
 ```
 
-Mỗi lần chạy dùng process riêng, warm-up 3 batch. Lưu video/log/metrics từng lần; `summary.csv`, `summary.json`, `report.md` tổng hợp median/min/max. Dùng thư mục mới cho mỗi đợt benchmark; `--report-only` tái tạo báo cáo từ kết quả cũ.
+Mỗi lần chạy dùng process riêng, warm-up 3 batch. Thêm `--batch-size 4` để dùng batch 4 cho mọi device trong đợt benchmark; nếu bỏ qua, CPU dùng 1 và GPU dùng 8. Lưu video/log/metrics từng lần; `summary.csv`, `summary.json`, `report.md` tổng hợp median/min/max. Dùng thư mục mới cho mỗi đợt benchmark; `--report-only` tái tạo báo cáo từ kết quả cũ.
 
 `processing_seconds` là wall time xử lý gồm hai lượt decode, detect, gom đoạn, encode và ghép audio, không gồm khởi tạo model, warm-up, bước decode xác minh output. `inference_seconds` bao gồm tiền/hậu xử lý của PaddleX và được đồng bộ GPU. Latency p95/median tính **theo batch**, không phải độ trễ từng frame. `amortized_inference_ms_per_frame` là tổng thời gian inference chia số frame. `total_seconds_including_init_warmup_verify` phản ánh tổng thời gian kể cả chuẩn bị/kiểm tra. Seek đến `--start` hiện decode và bỏ các frame trước đó; hãy benchmark cùng start để so sánh công bằng.
 
