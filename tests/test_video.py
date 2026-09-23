@@ -6,7 +6,7 @@ import av
 import imageio_ffmpeg
 import numpy as np
 import pytest
-from detect_subtitles import parser, run
+from detect_subtitles import parser, run, validate
 
 
 class StubDetector:
@@ -130,10 +130,78 @@ def test_render_uses_constant_box_for_one_subtitle(tmp_path):
             return results, .001
 
     args = parser().parse_args(['--input', str(source_path), '--output', str(output),
-                                '--device', 'cpu', '--warmup', '0'])
+                                '--device', 'cpu', '--warmup', '0', '--min-subtitle-seconds', '0'])
     metrics = run(args, detector=JitterDetector())
     rows = [json.loads(line) for line in output.with_suffix('.jsonl').read_text().splitlines()]
     assert metrics['subtitle_segments'] == 1
     assert len(rows) == 8
     assert all(row['boxes_xyxy'] == rows[0]['boxes_xyxy'] for row in rows)
     assert rows[0]['boxes_xyxy']
+
+
+def test_short_false_positive_is_absent_from_video_metadata(tmp_path):
+    source_path, output = tmp_path/'input.mp4', tmp_path/'output.mp4'
+    make_video(source_path, [i/30 for i in range(9)])
+
+    class OneFrameDetector:
+        calls = 0
+
+        def predict(self, images):
+            results = []
+            for _ in images:
+                found = self.calls == 4
+                self.calls += 1
+                results.append({'dt_polys': [[[30, 10], [110, 10], [110, 20], [30, 20]]] if found else [],
+                                'dt_scores': [.9] if found else []})
+            return results, .001
+
+    args = parser().parse_args(['--input', str(source_path), '--output', str(output),
+                                '--device', 'cpu', '--warmup', '0'])
+    metrics = run(args, detector=OneFrameDetector())
+    rows = [json.loads(line) for line in output.with_suffix('.jsonl').read_text().splitlines()]
+    assert metrics['subtitle_segments'] == 0
+    assert metrics['discarded_short_segments'] == 1
+    assert all(row['boxes_xyxy'] == [] for row in rows)
+    assert np.allclose(timestamps(source_path), timestamps(output), atol=1/90000)
+
+
+def test_trimmed_subtitle_edges_are_preserved(tmp_path):
+    source_path, output = tmp_path/'input.mp4', tmp_path/'output.mp4'
+    make_video(source_path, [i/30 for i in range(15)])
+
+    class EdgeDetector:
+        calls = 0
+
+        def predict(self, images):
+            results = []
+            for _ in images:
+                found = self.calls in (0, 5)
+                self.calls += 1
+                results.append({'dt_polys': [[[30, 10], [110, 10], [110, 20], [30, 20]]] if found else [],
+                                'dt_scores': [.9] if found else []})
+            return results, .001
+
+    args = parser().parse_args(['--input', str(source_path), '--output', str(output),
+                                '--device', 'cpu', '--warmup', '0', '--start', '.1',
+                                '--duration', '.2'])
+    metrics = run(args, detector=EdgeDetector())
+    rows = [json.loads(line) for line in output.with_suffix('.jsonl').read_text().splitlines()]
+    assert len(rows) == 6
+    assert metrics['subtitle_segments'] == 2
+    assert metrics['discarded_short_segments'] == 0
+    assert rows[0]['boxes_xyxy'] and rows[-1]['boxes_xyxy']
+    assert all(row['boxes_xyxy'] == [] for row in rows[1:-1])
+
+
+@pytest.mark.parametrize('flag,value', [
+    ('--min-subtitle-seconds', '-0.1'),
+    ('--min-subtitle-seconds', 'nan'),
+    ('--min-detection-frames', '-1'),
+])
+def test_reject_invalid_short_subtitle_threshold(tmp_path, flag, value):
+    source_path = tmp_path/'input.mp4'
+    make_video(source_path, [0, 1/30])
+    args = parser().parse_args(['--input', str(source_path), '--output', str(tmp_path/'out.mp4'),
+                                '--device', 'cpu', flag, value])
+    with pytest.raises(ValueError):
+        validate(args)

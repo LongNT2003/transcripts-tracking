@@ -129,16 +129,21 @@ class Stabilizer:
 
 
 class SubtitleSegments:
-    """Assign one robust, screen-space box to each stationary subtitle run."""
+    """Assign one robust, screen-space box to each sufficiently supported run."""
 
-    def __init__(self, width, height, padding=3, max_gap=2):
+    def __init__(self, width, height, padding=3, max_gap=2,
+                 min_seconds=.8, min_detection_frames=3):
         self.width, self.height = width, height
         self.padding, self.max_gap = padding, max_gap
+        self.min_seconds = min_seconds
+        self.min_detection_frames = min_detection_frames
         self.frames = []
         self.active = []
+        self.completed = []
         self.count = 0
+        self.discarded_short_segments = 0
 
-    def _finish(self, track):
+    def _assign(self, track):
         coords = np.asarray(track['boxes'], dtype=float)
         low = np.quantile(coords[:, :2], .1, axis=0)
         high = np.quantile(coords[:, 2:], .9, axis=0)
@@ -152,7 +157,7 @@ class SubtitleSegments:
             self.frames[index].append(box)
         self.count += 1
 
-    def add(self, gray, boxes):
+    def add(self, gray, boxes, timestamp, duration):
         index = len(self.frames)
         self.frames.append([])
         signatures = [appearance(gray, track['anchor']) for track in self.active]
@@ -170,6 +175,8 @@ class SubtitleSegments:
             track['boxes'].append(boxes[bi])
             track['signature'] = signatures[ti]
             track['last'] = index
+            track['end_time'] = timestamp + duration
+            track['detections'] += 1
             matched_tracks.add(ti)
             matched_boxes.add(bi)
         remaining = []
@@ -181,17 +188,29 @@ class SubtitleSegments:
                   and similar(track['signature'], signatures[ti], threshold=.8)):
                 remaining.append(track)
             else:
-                self._finish(track)
+                self.completed.append(track)
         self.active = remaining
         for bi, box in enumerate(boxes):
             if bi not in matched_boxes:
                 self.active.append({'start': index, 'last': index, 'anchor': box,
-                                    'boxes': [box], 'signature': appearance(gray, box)})
+                                    'boxes': [box], 'signature': appearance(gray, box),
+                                    'start_time': timestamp, 'end_time': timestamp+duration,
+                                    'detections': 1})
 
-    def finish(self):
-        for track in self.active:
-            self._finish(track)
+    def finish(self, preserve_first=False, preserve_last=False):
+        self.completed.extend(self.active)
         self.active.clear()
+        last_frame = len(self.frames)-1
+        for track in self.completed:
+            at_trim_edge = ((preserve_first and track['start'] == 0)
+                            or (preserve_last and track['last'] == last_frame))
+            span = track['end_time']-track['start_time']
+            if not at_trim_edge and (track['detections'] < self.min_detection_frames
+                                     or span + 1e-9 < self.min_seconds):
+                self.discarded_short_segments += 1
+                continue
+            self._assign(track)
+        self.completed.clear()
         for boxes in self.frames:
             boxes.sort(key=lambda box: (box[1], box[0]))
         return self.frames

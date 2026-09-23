@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import pytest
-from subtitle_core import Record, Stabilizer, boxes_from_result, merge_lines
+from subtitle_core import Record, Stabilizer, SubtitleSegments, boxes_from_result, merge_lines
 
 
 def record(boxes, text='ABC', background=0):
@@ -60,7 +60,6 @@ def test_scene_cut_clears_previous_tracks():
 
 
 def test_offline_segments_hold_one_box_and_split_changed_text(monkeypatch):
-    from subtitle_core import SubtitleSegments
     import subtitle_core
 
     # Isolate tracking from Canny: each pixel value represents a distinct line.
@@ -70,17 +69,17 @@ def test_offline_segments_hold_one_box_and_split_changed_text(monkeypatch):
             np.array([0., 2.]) if value == 2 else np.zeros(2))
 
     monkeypatch.setattr(subtitle_core, 'appearance', signature)
-    segments = SubtitleSegments(240, 120, padding=3)
+    segments = SubtitleSegments(240, 120, padding=3, min_seconds=0, min_detection_frames=0)
     jittered = [[30, 60, 110, 96], [32, 61, 112, 97],
                 [29, 59, 109, 95], [31, 60, 111, 96]]
-    for box in jittered[:2]:
-        segments.add(np.full((120, 240), 1, np.uint8), [box])
-    segments.add(np.full((120, 240), 1, np.uint8), [])  # brief detector miss
-    for box in jittered[2:]:
-        segments.add(np.full((120, 240), 1, np.uint8), [box])
-    for _ in range(3):
-        segments.add(np.full((120, 240), 2, np.uint8), [[30, 60, 110, 96]])
-    segments.add(np.zeros((120, 240), np.uint8), [])
+    for index, box in enumerate(jittered[:2]):
+        segments.add(np.full((120, 240), 1, np.uint8), [box], index/30, 1/30)
+    segments.add(np.full((120, 240), 1, np.uint8), [], 2/30, 1/30)  # brief detector miss
+    for index, box in enumerate(jittered[2:], start=3):
+        segments.add(np.full((120, 240), 1, np.uint8), [box], index/30, 1/30)
+    for index in range(5, 8):
+        segments.add(np.full((120, 240), 2, np.uint8), [[30, 60, 110, 96]], index/30, 1/30)
+    segments.add(np.zeros((120, 240), np.uint8), [], 8/30, 1/30)
 
     frames = segments.finish()
     assert segments.count == 2
@@ -91,12 +90,52 @@ def test_offline_segments_hold_one_box_and_split_changed_text(monkeypatch):
 
 
 def test_offline_segments_split_changed_phrase_at_same_box():
-    from subtitle_core import SubtitleSegments
-
-    segments = SubtitleSegments(180, 120)
-    for phrase in ['HELLO WORLD'] * 3 + ['HELLO THERE'] * 3:
+    segments = SubtitleSegments(180, 120, min_seconds=0, min_detection_frames=0)
+    for index, phrase in enumerate(['HELLO WORLD'] * 3 + ['HELLO THERE'] * 3):
         gray = np.zeros((120, 180), np.uint8)
         cv2.putText(gray, phrase, (25, 85), cv2.FONT_HERSHEY_SIMPLEX, .55, 255, 1)
-        segments.add(gray, [[20, 60, 150, 96]])
+        segments.add(gray, [[20, 60, 150, 96]], index/30, 1/30)
     segments.finish()
     assert segments.count == 2
+
+
+@pytest.mark.parametrize('times,detections,duration,keep', [
+    ([0.0], [0], .04, False),                  # one detection
+    ([0.0, .3], [0, 1], .04, False),         # long span, insufficient support
+    ([0.0, .4, .77], [0, 1, 2], .03, True), # exactly 0.8 seconds
+    ([0.0, .1, .17], [0, 1, 2], .03, False), # 0.2 seconds is now too short
+    ([0.0, .03, .06], [0, 1, 2], .03, False),
+    ([0.0, .1, .2, .3], [0, 3], .04, False), # two missed frames do not count
+])
+def test_short_segment_filter_uses_time_and_real_detections(times, detections, duration, keep):
+    segments = SubtitleSegments(240, 120)
+    gray = record([BOX]).gray
+    for index, timestamp in enumerate(times):
+        segments.add(gray, [BOX] if index in detections else [], timestamp, duration)
+    frames = segments.finish()
+    assert segments.count == int(keep)
+    assert segments.discarded_short_segments == int(not keep)
+    assert bool(frames[0]) == keep
+
+
+@pytest.mark.parametrize('edge,first,last', [
+    ('first', True, False),
+    ('last', False, True),
+])
+def test_short_segment_at_trim_edge_is_kept(edge, first, last):
+    segments = SubtitleSegments(240, 120)
+    gray = record([BOX]).gray
+    for index in range(3):
+        segments.add(gray, [BOX] if (index == 0 if edge == 'first' else index == 2) else [],
+                     index/30, 1/30)
+    frames = segments.finish(preserve_first=first, preserve_last=last)
+    assert segments.count == 1
+    assert segments.discarded_short_segments == 0
+    assert frames[0 if first else 2]
+
+
+def test_zero_thresholds_disable_short_segment_filter():
+    segments = SubtitleSegments(240, 120, min_seconds=0, min_detection_frames=0)
+    segments.add(record([BOX]).gray, [BOX], 0, 1/30)
+    assert segments.finish()[0]
+    assert segments.discarded_short_segments == 0

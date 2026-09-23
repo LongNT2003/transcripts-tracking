@@ -29,7 +29,7 @@ Output cùng tên:
 
 - `.mp4`: H.264, giữ timestamp nguồn và kích thước; audio đầu tiên được trim theo PTS và encode AAC 192 kbps. Video không audio vẫn xử lý được.
 - `.jsonl`: mỗi frame một dòng, `frame_index` gốc (0-based), `source_timestamp_seconds` tính từ frame đầu của video nguồn, `output_timestamp_seconds` tính từ frame đầu được chọn, `boxes_xyxy` là tọa độ box đã vẽ trong ảnh gốc.
-- `.metrics.json`: cấu hình máy, phiên bản thư viện, số frame, thông số video và thời gian từng bước.
+- `.metrics.json`: cấu hình máy, phiên bản thư viện, số frame, số đoạn phụ đề được giữ (`subtitle_segments`), số đoạn ngắn bị loại (`discarded_short_segments`), thông số video và thời gian từng bước.
 
 Không ghi đè nếu thiếu `--overwrite`; không cho phép dùng đường dẫn input làm output. File tạm tự dọn khi gặp lỗi. GPU không khả dụng sẽ báo lỗi, không âm thầm chuyển CPU.
 
@@ -37,9 +37,9 @@ Không ghi đè nếu thiếu `--overwrite`; không cho phép dùng đường d�
 
 Quét mọi frame, crop 45% đáy trước detector. Model resize tối đa cạnh dài 960 px, không phóng lớn ROI nhỏ. `--roi-bottom 0.25` đến `0.45` điều chỉnh vùng quét; ROI hẹp có thể bỏ phụ đề nằm cao trong video dọc.
 
-Polygon được quy đổi về ảnh gốc, lọc confidence/kích thước/góc, rồi ghép mảnh chữ cùng dòng. Pipeline chạy hai lượt: lượt đầu detect và gom các frame liên tiếp có cùng dòng phụ đề bằng IoU và dấu vết cạnh chữ trên một vùng ảnh cố định; lượt sau đọc lại video gốc để vẽ. Mỗi đoạn được chốt một box từ phân vị 10%/90% của các detection, nên box đứng yên trong suốt đoạn. Có thể bù tối đa 2 frame mất detection khi hình dạng chữ vẫn giống và detection xuất hiện trở lại. Khi câu thay đổi hoặc chữ biến mất, đoạn được kết thúc. Box xanh có padding 3 px, nét 2 px.
+Polygon được quy đổi về ảnh gốc, lọc confidence/kích thước/góc, rồi ghép mảnh chữ cùng dòng. Pipeline chạy hai lượt: lượt đầu detect và gom các frame liên tiếp có cùng dòng phụ đề bằng IoU và dấu vết cạnh chữ trên một vùng ảnh cố định; lượt sau đọc lại video gốc để vẽ. Đoạn chỉ được giữ khi có ít nhất 3 frame được model detect thật và kéo dài ít nhất 0,8 giây tính theo timestamp; frame được bù không tăng số detection. Đoạn chạm mép khoảng bị cắt bởi `--start` hoặc `--duration` được giữ vì có thể chỉ là một phần phụ đề. Mỗi đoạn được giữ có một box cố định từ phân vị 10%/90% của các detection, nên box đứng yên trong suốt đoạn. Có thể bù tối đa 2 frame mất detection khi hình dạng chữ vẫn giống và detection xuất hiện trở lại. Khi câu thay đổi hoặc chữ biến mất, đoạn được kết thúc. Box xanh có padding 3 px, nét 2 px.
 
-GPU dùng batch 8, CPU batch 1; đổi bằng `--batch-size`. Nếu thiếu VRAM, giảm batch xuống 4/2/1. Bộ nhớ ảnh giới hạn theo batch; tọa độ frame và box của các đoạn được giữ đến lượt vẽ thứ hai. Video nguồn được giải mã hai lần. `--box-threshold`, `--pixel-threshold`, `--det-size`, `--padding`, `--cpu-threads` đều chỉnh được; xem `--help`.
+GPU dùng batch 8, CPU batch 1; đổi bằng `--batch-size`. Nếu thiếu VRAM, giảm batch xuống 4/2/1. Bộ nhớ ảnh giới hạn theo batch; tọa độ frame và box của các đoạn được giữ đến lượt vẽ thứ hai. Video nguồn được giải mã hai lần. Dùng `--min-subtitle-seconds` và `--min-detection-frames` để đổi hai ngưỡng lọc, đặt từng ngưỡng thành `0` để tắt kiểm tra tương ứng. `--box-threshold`, `--pixel-threshold`, `--det-size`, `--padding`, `--cpu-threads` đều chỉnh được; xem `--help`.
 
 CPU mặc định tắt oneDNN: kiểm thử PP-OCRv6_small_det với PaddlePaddle 3.3.0 Windows gặp lỗi `ConvertPirAttribute2RuntimeAttribute` khi bật. Chỉ thử `--enable-mkldnn` trên runtime đã xác nhận hỗ trợ; nếu lỗi, bỏ cờ này. Benchmark phải ghi rõ trạng thái oneDNN để so sánh công bằng.
 

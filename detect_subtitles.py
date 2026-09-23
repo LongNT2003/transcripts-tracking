@@ -103,6 +103,10 @@ def parser():
     p.add_argument('--duration', type=float)
     p.add_argument('--warmup', type=int, default=3)
     p.add_argument('--padding', type=int, default=3)
+    p.add_argument('--min-subtitle-seconds', type=float, default=.8,
+                   help='Minimum detected subtitle span in seconds; 0 disables this check')
+    p.add_argument('--min-detection-frames', type=int, default=3,
+                   help='Minimum frames with real detections; 0 disables this check')
     p.add_argument('--overwrite', action='store_true')
     return p
 
@@ -122,6 +126,8 @@ def validate(args):
         args.batch_size = 8 if args.device.startswith('gpu:') else 1
     if min(args.batch_size, args.cpu_threads, args.det_size) < 1 or args.warmup < 0 or args.padding < 0:
         raise ValueError('Invalid batch size, threads, image size, warmup or padding')
+    if not np.isfinite(args.min_subtitle_seconds) or args.min_subtitle_seconds < 0 or args.min_detection_frames < 0:
+        raise ValueError('Minimum subtitle seconds and detection frames must be nonnegative')
     if not all(0 < x < 1 for x in [args.pixel_threshold, args.box_threshold]):
         raise ValueError('Thresholds must be between zero and one')
     for path in [args.output, args.output.with_suffix('.jsonl'), args.output.with_suffix('.metrics.json')]:
@@ -129,7 +135,7 @@ def validate(args):
             raise FileExistsError(f'{path} exists; use --overwrite explicitly')
 
 
-def selected_frames(source, args):
+def selected_frames(source, args, selection_state=None):
     """Decode in presentation order and select the same source interval on both passes."""
     first_source_time = previous_timestamp = None
     for index, frame in enumerate(source.decode(source.streams.video[0])):
@@ -145,6 +151,8 @@ def selected_frames(source, args):
         if relative < args.start-1e-7:
             continue
         if args.duration is not None and relative >= args.start+args.duration-1e-7:
+            if selection_state is not None:
+                selection_state['trimmed_end'] = True
             break
         yield index, timestamp, relative, frame
 
@@ -176,8 +184,11 @@ def run(args, detector=None):
         video_path = Path(tmp)/'silent.mp4'
         json_path = Path(tmp)/'boxes.jsonl'
         final_path = Path(tmp)/'result.mp4'
-        segments = SubtitleSegments(width, height, args.padding)
+        segments = SubtitleSegments(width, height, args.padding,
+                                    min_seconds=args.min_subtitle_seconds,
+                                    min_detection_frames=args.min_detection_frames)
         frames, batch = [], []
+        selection_state = {}
         process_start = time.perf_counter()
         warmed = False
 
@@ -196,7 +207,7 @@ def run(args, detector=None):
             begin = time.perf_counter()
             for (record, relative), result in zip(batch, results):
                 boxes = boxes_from_result(result, roi_y, width, height, args.box_threshold)
-                segments.add(record.gray, boxes)
+                segments.add(record.gray, boxes, record.timestamp, record.duration)
                 frames.append((record.index, record.timestamp, relative, record.duration))
             metrics['postprocess_seconds'] += time.perf_counter()-begin
             batch.clear()
@@ -204,7 +215,7 @@ def run(args, detector=None):
                 print(f'Detected {len(frames)} frames', flush=True)
 
         # Pass 1: detect every selected frame, then settle each subtitle run's box.
-        decoded = iter(selected_frames(source, args))
+        decoded = iter(selected_frames(source, args, selection_state))
         while True:
             begin = time.perf_counter()
             try:
@@ -223,9 +234,12 @@ def run(args, detector=None):
         if not frames:
             raise ValueError('Selected video interval has no frames')
         begin = time.perf_counter()
-        stable_boxes = segments.finish()
+        stable_boxes = segments.finish(
+            preserve_first=args.start > 0 and frames[0][0] > 0,
+            preserve_last=selection_state.get('trimmed_end', False))
         metrics['postprocess_seconds'] += time.perf_counter()-begin
         metrics['subtitle_segments'] = segments.count
+        metrics['discarded_short_segments'] = segments.discarded_short_segments
         first_output_time = frames[0][1]
         last_time = frames[-1][1]
         last_duration = frames[-1][3]
